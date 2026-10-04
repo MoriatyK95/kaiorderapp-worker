@@ -298,7 +298,7 @@ describe("Authenticated identity page", () => {
 });
 
 describe("Exact route matching", () => {
-	it.each(["/", "/securely", "/secure/", "/secure/SG"])(
+	it.each(["/", "/securely", "/secure/"])(
 		"keeps %s outside the identity handler",
 		async (path) => {
 			const response = await worker.fetch(request(undefined, path), config);
@@ -389,4 +389,53 @@ describe("verified token country integration", () => {
 		await expectRejection(await worker.fetch(request(token), { ...config, DEBUG_COUNTRY: "true" }));
 		expect(info).not.toHaveBeenCalled();
 	});
+});
+
+
+describe("Private flag responses", () => {
+  it.each([undefined, "not-a-jwt"])(
+    "rejects missing or malformed credentials before reading R2: %s",
+    async (token) => {
+      const get = vi.fn();
+
+      const response = await worker.fetch(
+        request(token, "/secure/SG"),
+        { ...config, FLAGS: { get } },
+      );
+
+      expect(response.status).toBe(403);
+      expect(get).not.toHaveBeenCalled();
+    },
+  );
+
+  it("returns the stored SVG after successful token verification", async () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"></svg>';
+    const get = vi.fn().mockResolvedValue({
+      body: new Response(svg).body,
+    });
+
+    const response = await worker.fetch(
+      request(await sign(), "/secure/SG"),
+      { ...config, FLAGS: { get } },
+    );
+
+    expect(response.status).toBe(200);
+    expect(get).toHaveBeenCalledWith("flags/SG.svg");
+    expect(response.headers.get("Content-Type")).toBe("image/svg+xml");
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(await response.text()).toBe(svg);
+    expect(identityRequests()).toHaveLength(0);
+  });
+
+  it("returns 404 when the requested flag is absent", async () => {
+    const get = vi.fn().mockResolvedValue(null);
+
+    const response = await worker.fetch(
+      request(await sign(), "/secure/US"),
+      { ...config, FLAGS: { get } },
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("Flag not found.");
+  });
 });

@@ -10,6 +10,7 @@
 
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { createIdentityPage, IdentityLookupError } from "./identity-page.js";
+import { createFlagResponse } from "./flag-response.js";
 
 // Reuse the public-key lookup between requests.
 let publicKeys;
@@ -32,8 +33,10 @@ export default {
 	async fetch(request, env) {
 		const url = new URL(request.url);
 
-		// 1. Handle only the page we are building.
-		if (url.pathname !== "/secure") {
+		// 1. Recognise the identity page and country-flag paths.
+		const flagMatch = /^\/secure\/([A-Z]{2})$/.exec(url.pathname);
+
+		if (url.pathname !== "/secure" && !flagMatch) {
 			return textResponse("Not found", 404);
 		}
 
@@ -88,6 +91,11 @@ export default {
 			payload.email.trim() === ""
 		) {
 			return textResponse("A signed-in user is required.", 403);
+		}
+
+		// The Access token and user claims have already been verified above.
+		if (flagMatch) {
+			return createFlagResponse(flagMatch[1], env, request.method);
 		}
 
 		try {

@@ -1,7 +1,8 @@
 # kaiorderapp-worker
 
 A JavaScript Cloudflare Worker that verifies a Cloudflare Access application
-JWT and shows an authenticated HTML identity page at the exact `/secure` path.
+JWT, shows an authenticated HTML identity page at the exact `/secure` path,
+and serves country flags from private R2 storage at `/secure/<COUNTRY>`.
 The page is headed **KaiOrderApp Secure** and displays:
 
 ```text
@@ -10,21 +11,22 @@ user@example.com authenticated at 2024-01-01T00:00:00.000Z from SG
 
 Those values are illustrative. Each response uses the authenticated user's
 actual email and recorded login details. The country links to `/secure/SG` in
-this example. Country destinations and private flag retrieval are not
-implemented; those paths currently return 404.
+this example, which returns the Singapore SVG when that object exists in R2.
+The page invites the user to select the country code to view its flag.
 
 ## Request flow and identity data
 
-1. Cloudflare Access handles login and its allow policy. This repository does
-   not provision the Access application or policy.
+1. Cloudflare Access handles login and authorisation for the protected routes.
+   This repository does not provision the Access application or policy.
 2. The Worker reads `Cf-Access-Jwt-Assertion`. `jose` verifies the RS256 signature
    using public keys from the configured team's `/cdn-cgi/access/certs`
    endpoint, checks the expected issuer and application audience, and requires
    `exp`, `sub`, and `email`. Expiration and applicable `nbf` checks remain in
    place. If present, `iat` must be numeric; no additional maximum token age is
    configured. The payload must be an `app` token with nonblank string subject
-   and email fields.
-3. Only after verification, the Worker makes a server-side GET to
+   and email fields. These checks run before returning identity information or
+   reading a flag from R2.
+3. For `/secure`, only after verification, the Worker makes a server-side GET to
    `${ACCESS_TEAM_DOMAIN}/cdn-cgi/access/get-identity`, sending only the verified
    token as the `CF_Authorization` cookie. It does not forward browser cookies
    or other incoming headers. The lookup has an eight-second timeout covering
@@ -37,7 +39,8 @@ implemented; those paths currently return 404.
    `iat`**. For **login country**, it first accepts a usable verified JWT
    `country`, then falls back to identity `geo`, then displays **Unknown**.
    When both sources are usable but disagree, the verified JWT takes priority.
-   The identity lookup and subject/timestamp checks are required in every case.
+   The identity lookup and subject/timestamp checks are required for every
+   identity-page response. Flag requests do not perform this identity lookup.
    It does not substitute page-load time, JWT issuance time, request geolocation,
    or a default country.
 
@@ -64,6 +67,26 @@ The [request metadata documentation](https://developers.cloudflare.com/workers/r
 describes `request.cf.country` as the incoming request's country; it is not a
 fallback for historical login location. See also [JWT verification documentation](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/).
 
+## Private flag responses
+
+After Access token verification, `GET /secure/<COUNTRY>` reads
+`flags/<COUNTRY>.svg` through the `FLAGS` binding. For example, `/secure/SG`
+reads `flags/SG.svg` in `kaiorderapp-flags`. Paths require exactly two uppercase
+ASCII letters; `XX` and `ZZ` are rejected. The requested country does not have
+to match the authenticated user's login country.
+
+The bucket remains private. The Worker returns the stored SVG body directly,
+without redirecting visitors to a public R2 URL. A successful response is HTTP
+200 with `Content-Type: image/svg+xml`, `Cache-Control: private, no-store`,
+`X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`. Its CSP is
+`default-src 'none'; style-src 'unsafe-inline'; sandbox`.
+
+`HEAD` is supported: the handler calls `FLAGS.head()` and returns the same
+success headers without downloading or returning the SVG body. Errors from
+the flag handler also have no body for HEAD. Other methods return 405 with
+`Allow: GET, HEAD`, after authentication. Missing objects, invalid paths, and
+storage failures are described in the error table below.
+
 ## Configuration
 
 `wrangler.jsonc` remains tracked with the working deployment settings:
@@ -75,17 +98,49 @@ fallback for historical login location. See also [JWT verification documentation
 - `vars.ACCESS_AUD`: the Access application's audience identifier. The AUD and
   team domain are non-secret configuration identifiers, not credentials.
 - Top-level route: `https://tunnel.kaiorderapp.com/secure*`, zone `kaiorderapp.com`.
+- Top-level `r2_buckets`: binding `FLAGS` targets `kaiorderapp-flags`.
 - `workers_dev: false` and `preview_urls: false`: alternate publication endpoints
   are disabled.
 
-`vars` provides runtime values through `env`. The top-level `routes` array
-selects which requests invoke the deployed Worker; it belongs outside `vars`.
-The route is broader than the handler: `/secure/`, `/securely`, and `/secure/SG`
-return 404 if routed here. Query strings do not change the pathname `/secure`.
+`vars` provides runtime values through `env`. Both `routes` and `r2_buckets`
+belong at the top level, outside `vars`. The route selects which requests invoke
+the deployed Worker and is broader than its handlers: `/secure/`, `/securely`,
+`/secure/sg`, and `/secure/SG/` return 404 if they reach the Worker. Query strings
+do not affect pathname matching or the R2 object key.
 
 Deploying your own copy requires your own domain, Access application, and
-corresponding issuer, AUD, and route/zone settings. Access policies, Tunnel, and
-DNS are managed separately. This Worker has no R2 binding or object-retrieval code.
+corresponding issuer, AUD, route/zone settings, and private R2 bucket binding.
+Access policies, Tunnel, DNS, and bucket settings are managed separately.
+
+## Flag assets and uploads
+
+The existing development dependency `flag-icons` supplies SVG artwork. Installed
+version 7.5.0 has lowercase source filenames in `node_modules/flag-icons/flags/4x3/`
+and `node_modules/flag-icons/flags/1x1/`. R2 keys use uppercase country codes,
+such as `flags/SG.svg`. The source image's aspect ratio does not change the key.
+
+No upload script is checked into this repository. Use the installed Wrangler
+tooling for manual uploads, choosing the intended source SVG. For example, to
+write the 4:3 Singapore asset to the remote bucket:
+
+```bash
+npx wrangler r2 object put kaiorderapp-flags/flags/SG.svg \
+  --file node_modules/flag-icons/flags/4x3/sg.svg \
+  --content-type image/svg+xml \
+  --remote \
+  --config wrangler.jsonc
+```
+
+This command creates or replaces that object; it is a manual maintenance step,
+not part of tests, Git pushes, or the Worker deployment. The example does not
+establish which aspect ratio is already stored. R2 objects are managed separately
+from Git source; installing the dependency or pushing this repository does not
+upload them. Keep bucket public access disabled.
+
+Artwork attribution: [flag-icons](https://github.com/lipis/flag-icons),
+Copyright (c) 2013 Panayiotis Lipiridis, MIT licence. The full notice is included
+in `node_modules/flag-icons/LICENSE`; preserve its copyright and permission
+notice when copying or redistributing the artwork.
 
 ## Local development and checks
 
@@ -124,34 +179,53 @@ recorded login time, country precedence/fallback/normalisation, unknown values,
 injection rejection, opt-in sanitised diagnostics, response validation, timeouts,
 redirect rejection, and private/no-store responses. Native Worker
 request construction is exercised so mocked fetches do not hide unsupported
-request options. These tests and a deployment dry run do not prove a live Access
-session succeeds.
+request options. Flag tests cover missing/malformed authentication before R2
+reads, a successful SVG response with its content type and no-store header,
+and a missing-object 404. They use mocked R2 reads. HEAD and the remaining flag
+error branches are implemented but are not covered by the existing flag tests.
+These tests and a deployment dry run do not prove live R2 access or authentication.
 
-The owner previously reported missing-token, email-only, and malformed-token
-rejection checks. After the country fix, the owner confirmed the live HTML page
-shows the country link and retains the recorded timestamp. The displayed result
-does not establish which live source supplied the country or either field's type.
+## Owner-reported live verification
+
+The project owner manually reported these results; they were not live checks
+performed as part of this documentation cleanup:
+
+- An approved Access login displays the HTML identity sentence with a clickable
+  SG country code, and following it displays the Singapore flag.
+- The authenticated flag response is HTTP 200 with `Content-Type: image/svg+xml`
+  and `Cache-Control: private, no-store`.
+- An anonymous GET to `/secure/SG` returns HTTP 302 to Access login. An anonymous
+  HEAD request also returns an Access login redirect.
+- Additional country assets have been uploaded to the remote R2 bucket.
+
+These observations do not establish coverage of every country or security
+scenario, or the contents of every remote object. They do not certify the
+application as production-ready. Locally edited page wording appears live only
+after the corresponding Worker version is deployed.
 
 ## Errors and safe troubleshooting
 
 | Condition | Response |
 | --- | --- |
-| Other pathname | 404, `Not found` |
+| Unmatched pathname, including lowercase or malformed flag paths | 404, `Not found` |
 | Missing issuer/audience, or placeholder audience | 500, `Access configuration is incomplete.` |
 | Missing assertion header | 403, `Access token is missing.` |
 | Failed JWT verification | 403, `Access token could not be verified.` |
 | Verified token lacks application/user fields | 403, `A signed-in user is required.` |
 | Identity retrieval, validation, or rendering fails | 502, `Unable to load login details. Please try again.` |
+| Authenticated flag request with a method other than GET/HEAD | 405, `Method not allowed.`, with `Allow: GET, HEAD` |
+| Authenticated flag request for `XX`, `ZZ`, or a missing object | 404, `Flag not found.` |
+| Authenticated flag request without a `FLAGS` binding | 500, `Flag storage is not configured.` |
+| R2 read throws | 502, `Unable to load the flag. Please try again.` |
 
-Error responses remain generic and use private/no-store caching. Identity-service
-failures are kept separate from authentication rejection.
+These are Worker responses; Cloudflare Access can redirect a request to login
+before it reaches the Worker. Worker errors use `Content-Type: text/plain;
+charset=utf-8`, `Cache-Control: private, no-store`, and `nosniff`. Identity-service
+and R2 failures remain separate from authentication rejection. An R2 exception
+logs only the fixed message `R2 flag read failed.`.
 
-The previous helper used `redirect: "error"`. In the installed Workers runtime,
-that option throws before sending the identity request, even though the current
-Request documentation lists it. This failure was reproduced locally with
-synthetic data; `redirect: "manual"` plus explicit rejection of 3xx responses
-fixes that reproduced failure without forwarding the credential. Verify changes
-to the authenticated page using the browser check below.
+The identity lookup uses `redirect: "manual"` and explicitly rejects 3xx
+responses so the credential is not forwarded to a redirect destination.
 
 Identity errors log only the fixed message `Access identity lookup failed` and
 sanitised metadata. Codes distinguish `invalid_endpoint`, `request_failed`,
@@ -167,11 +241,8 @@ response problem. A mismatch or missing timestamp must not be worked around by
 removing identity checks or inventing values. Share only the sanitised diagnostic
 fields when troubleshooting, never live tokens or cookies.
 
-The previous country renderer inspected only identity `geo`, even though it
-received the full verified JWT. It discarded any usable JWT `country` when
-`geo` was unusable. Synthetic tests reproduce this defect and confirm the
-token-first resolver fixes it. The actual live field values remain unconfirmed;
-the page must still show **Unknown** when neither source is usable.
+The country resolver prefers a usable verified JWT `country`, then identity
+`geo`. The page still shows **Unknown** when neither source is usable.
 
 Country diagnostics are disabled by default. For a controlled live check,
 explicitly enable the `DEBUG_COUNTRY` runtime variable as the string `true`:
@@ -221,15 +292,16 @@ email, a plausible recorded UTC login time, and the login country or **Unknown**
 Use the optional diagnostic check above to identify the selected source; these
 logs deliberately do not reveal the values of either field.
 Reload without starting a new login and check that the page is not displaying a
-fresh page-load timestamp. A valid country should link to `/secure/<CODE>`; that
-destination intentionally still returns 404. Inspect the response's no-store
-and security headers. If a 502 remains, use its sanitised diagnostic code to
-identify the next failure stage; do not copy session credentials out of the browser.
+fresh page-load timestamp. Follow the country link: an existing flag should
+return HTTP 200 and display as SVG, while a missing object returns 404. Inspect
+the content type, no-store header, and security headers. If a 502 occurs, use
+the sanitised log message to distinguish identity and R2 failures; do not copy
+session credentials out of the browser.
 
-GitHub pushes are separate from manual Wrangler deployments. This repository
-does not define a deployment workflow. The HTML update requires the manual
-browser verification above; it is not a production-readiness or comprehensive
-security-testing claim.
+This repository does not define a deployment workflow. Publishing source to
+GitHub is separate from the manual Wrangler deployment above. Check any
+externally configured build integration before pushing; a dry run only builds
+the Worker and does not publish it or verify remote bucket contents.
 
 ## Repository hygiene
 

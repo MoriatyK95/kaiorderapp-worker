@@ -18,7 +18,13 @@
       "pattern": "https://tunnel.kaiorderapp.com/secure*",
       "zone_name": "kaiorderapp.com"
     }
-  ]
+  ],
+  	"r2_buckets": [
+    {
+      "binding": "FLAGS",
+      "bucket_name": "kaiorderapp-flags"
+    }
+	]
 
 	/**
 	 * Smart Placement

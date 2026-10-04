@@ -170,7 +170,7 @@ export async function createIdentityPage(issuer, token, verifiedUser, { debugCou
       <h1>KaiOrderApp Secure</h1>
       <p class="identity">${email} authenticated at <time datetime="${timestamp}">${timestamp}</time> from ${countryHtml}</p>
       <p>The timestamp is the recorded login time in UTC. The country represents the login location.</p>
-      <p>Country links are provided for a future flag page. Their destinations are not implemented yet.</p>
+      <p> Select the country code to view its flag. </p>
     </main>
   </body>
 </html>`;
